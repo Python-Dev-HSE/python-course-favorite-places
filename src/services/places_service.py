@@ -99,17 +99,46 @@ class PlacesService:
         :return:
         """
 
-        # при изменении координат – обогащение данных путем получения дополнительной информации от API
-        # todo
+        original_place = await self.places_repository.find(primary_key)
+        only_description_updated = (original_place.latitude == place.latitude
+                                    and original_place.longitude == place.longitude)
+
+        if only_description_updated:
+            updated_place = original_place
+            updated_place.description = place.description
+
+        else:
+            updated_place = Place(
+                latitude=place.latitude,
+                longitude=place.longitude,
+                description=place.description,
+            )
+            # при изменении координат – обогащение данных путем получения дополнительной информации от API
+            if location := await LocationClient().get_location(
+                    latitude=place.latitude, longitude=place.longitude
+            ):
+                updated_place.country = location.alpha2code
+                updated_place.city = location.city
+                updated_place.locality = location.locality
 
         matched_rows = await self.places_repository.update_model(
-            primary_key, **place.dict(exclude_unset=True)
+            primary_key, **updated_place.dict(exclude_unset=True)
         )
         await self.session.commit()
 
-        # публикация события для попытки импорта информации
-        # по обновленному объекту любимого места в сервисе Countries Informer
-        # todo
+        try:
+            place_data = CountryCityDTO(
+                city=updated_place.city,
+                alpha2code=updated_place.country,
+            )
+            EventProducer().publish(
+                queue_name=settings.rabbitmq.queue.places_import, body=place_data.json()
+            )
+        except ValidationError:
+            logger.warning(
+                "The message was not well-formed during publishing event.",
+                exc_info=True,
+            )
 
         return matched_rows
 
